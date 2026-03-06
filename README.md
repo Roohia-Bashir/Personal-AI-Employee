@@ -695,7 +695,7 @@ Built for **Hackathon 0: Building Autonomous FTEs in 2026**
 
 - **Issues:** [GitHub Issues](https://github.com/yourusername/Personal-AI-Employee/issues)
 - **Documentation:** [Full Hackathon Spec](hackathon.md)
-- **Email:** your.email@example.com
+- **Email:** roohiabashir1994@gmail.com
 
 ---
 
