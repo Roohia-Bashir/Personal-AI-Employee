@@ -1,0 +1,193 @@
+"""
+WhatsApp Watcher - Silver Tier
+Monitors WhatsApp Web for urgent messages using Playwright.
+"""
+
+import json
+import os
+import time
+import urllib.parse
+from datetime import datetime
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+from watchers.base_watcher import BaseWatcher
+from watchers.config import Config
+
+URGENT_KEYWORDS = ["urgent", "asap", "invoice", "payment", "emergency", "important"]
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+BROWSER_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",  # ← ADD
+    "--host-resolver-rules=MAP web.whatsapp.com 157.240.227.60",
+]
+
+
+class WhatsAppWatcher(BaseWatcher):
+
+    def __init__(self):
+        super().__init__(
+            vault_path=Config.VAULT_PATH,
+            check_interval=Config.WHATSAPP_CHECK_INTERVAL,
+        )
+        self.session_path = Path(Config.WHATSAPP_SESSION_PATH)
+        self.session_path.mkdir(parents=True, exist_ok=True)
+        self.processed_ids: set[str] = self._load_processed_ids()
+
+    def _processed_ids_file(self) -> Path:
+        return self.logs / "processed_whatsapp.json"
+
+    def _load_processed_ids(self) -> set[str]:
+        f = self._processed_ids_file()
+        if f.exists():
+            return set(json.loads(f.read_text()))
+        return set()
+
+    def _save_processed_id(self, msg_id: str) -> None:
+        self.processed_ids.add(msg_id)
+        self._processed_ids_file().write_text(json.dumps(list(self.processed_ids)))
+
+    def check_for_updates(self) -> list:
+        if Config.DRY_RUN:
+            self.logger.info("[DRY RUN] Skipping WhatsApp browser session")
+            return []
+
+        urgent_messages = []
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch_persistent_context(
+                    str(self.session_path),
+                    headless=not bool(os.environ.get("DISPLAY")),  # ← CHANGE
+                    args=BROWSER_ARGS,
+                    user_agent=USER_AGENT,
+                    slow_mo=80,                                     # ← ADD
+                )
+                page = browser.pages[0] if browser.pages else browser.new_page()
+                page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
+                self.logger.info("Waiting for WhatsApp Web to load...")
+                time.sleep(40)
+
+                title = page.title()
+                self.logger.info(f"Page title: {title}")
+
+                pane = page.query_selector('#pane-side')
+                if not pane:
+                    self.logger.error("pane-side not found!")
+                    browser.close()
+                    return []
+
+                pane_text = pane.inner_text()
+                lines = pane_text.split('\n')
+
+                for i, line in enumerate(lines):
+                    line_lower = line.lower().strip()
+                    if any(kw in line_lower for kw in URGENT_KEYWORDS):
+                        start = max(0, i - 2)
+                        end = min(len(lines), i + 3)
+                        context = '\n'.join(lines[start:end]).strip()
+                        msg_id = str(hash(context))
+                        if msg_id not in self.processed_ids:
+                            urgent_messages.append({
+                                "id": msg_id,
+                                "text": context,
+                                "matched_line": line.strip(),
+                            })
+                            self.logger.info(f"Urgent message found: {line.strip()}")
+
+                self.logger.info(f"Found {len(urgent_messages)} urgent messages")
+                browser.close()
+
+        except Exception as e:
+            self.logger.error(f"WhatsApp browser error: {e}", exc_info=True)
+
+        return urgent_messages
+
+    def create_action_file(self, message: dict) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filepath = self.needs_action / f"WHATSAPP_{timestamp}.md"
+
+        filepath.write_text(f"""---
+type: whatsapp
+source: whatsapp_web
+received: {datetime.now().isoformat()}
+priority: high
+status: pending
+msg_id: {message['id']}
+---
+
+# WhatsApp Urgent Message
+
+**Received:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Priority:** High
+
+## Message Preview
+{message['text']}
+
+## Matched Keyword In
+{message.get('matched_line', 'N/A')}
+
+## Suggested Actions
+- [ ] Reply to sender
+- [ ] Generate invoice if requested
+- [ ] Escalate if payment-related
+
+---
+*Created by WhatsApp Watcher*
+""")
+        self._save_processed_id(message["id"])
+        self.logger.info(f"Created WhatsApp action file: {filepath.name}")
+        return filepath
+
+    def send_reply(self, to: str, message: str) -> bool:
+        """Send a WhatsApp message to a contact by phone number."""
+        if Config.DRY_RUN:
+            self.logger.info(f"[DRY RUN] Would send WhatsApp to {to}: {message}")
+            return True
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch_persistent_context(
+                    str(self.session_path),
+                    headless=not bool(os.environ.get("DISPLAY")),  # ← CHANGE
+                    args=BROWSER_ARGS,
+                    user_agent=USER_AGENT,
+                    slow_mo=80,                                     # ← ADD
+                )
+                page = browser.new_page()
+
+                phone = to.replace("+", "").replace(" ", "")
+                encoded_msg = urllib.parse.quote(message)
+                page.goto(f"https://web.whatsapp.com/send?phone={phone}&text={encoded_msg}")
+                self.logger.info(f"Opening chat with {to}...")
+                time.sleep(45)
+
+                textbox = page.query_selector('[contenteditable="true"][data-tab="10"]')
+                if not textbox:
+                    textbox = page.query_selector('[contenteditable="true"]')
+                if textbox:
+                    textbox.click()
+                    time.sleep(2)
+
+                send_btn = None
+                for btn in page.query_selector_all("button"):
+                    label = btn.get_attribute("aria-label")
+                    if label and "Send" in label:
+                        send_btn = btn
+                        break
+
+                if send_btn:
+                    send_btn.click()
+                    time.sleep(3)
+                    self.logger.info(f"Message sent to {to}")
+                    browser.close()
+                    return True
+                else:
+                    self.logger.error("Send button not found!")
+                    browser.close()
+                    return False
+
+        except Exception as e:
+            self.logger.error(f"WhatsApp send error: {e}", exc_info=True)
+            return False

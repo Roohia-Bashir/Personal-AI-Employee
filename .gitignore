@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[oc]
+*.pyc
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Environment & secrets
+.env
+credentials.json
+token.json
+token.pickle
+watchers/token.pickle
+
+# Browser sessions
+.whatsapp_session/
+.linkedin_session/
+.facebook_session/
+.twitter_session/
+
+# Logs
+logs/
+*.log
+
+# Obsidian
+AI_Employee_Vault/.obsidian/workspace*
+
+# Misc
+Personal_AI_Employee_Hackathon.md
+# Platinum additions
+*.pid
+watchdog.log
+cloud_orchestrator.log
+git_sync.log
+watchers/logs/
+uv.lock
